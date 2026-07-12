@@ -12,19 +12,20 @@ serverless clients.
 
 ## Architecture & Security Blueprint
 
-Because this application lacks a backend server to securely store secrets
-or orchestrate standard authorization flows, it functions strictly as an
-OAuth 2.0 **Public Client**:
+Because this application lacks a backend server to securely hold private
+credentials, it functions strictly as an OAuth 2.0 **Public Client** using
+the **Implicit Grant Flow**:
 
-* **Authentication via PKCE:** Implements **Authorization Code Flow with Proof Key for Code Exchange (PKCE)**. The browser generates a runtime cryptographic string (`code_verifier`) and a SHA-256 hash challenge (`code_challenge`) to negotiate tokens securely without exposing a Client Secret in the client-side source code.
-* **Direct REST Ingestion:** Data streams natively from Google Health API endpoints via asynchronous `fetch()` operations using standard `Bearer` token authorization headers.
+* **Zero-Secret Authentication:** The application leverages `response_type=token`. Rather than requesting a temporary server authorization code, Google returns an short-lived `access_token` directly in the browser's URL hash fragment upon user confirmation. This eliminates the need for an application Client Secret, allowing for safe hosting on public repositories.
+* **Direct REST Ingestion:** Data streams natively from Google Health API endpoints via asynchronous browser `fetch()` operations using standard `Bearer` token authorization headers.
 * **CORS Compatibility:** Origin requests hitting `https://health.googleapis.com` are natively handled by Google's API routing layer, removing the need for a proxy server or routing middleware.
 
 ---
 
 ## Google Cloud Console Provisioning Guide
 
-To run or deploy this application, you must provision an application footprint in the Google Cloud Platform (GCP) console to manage credentials.
+To run or deploy this application, you must provision an application
+footprint in the Google Cloud Platform (GCP) console to manage credentials.
 
 ### 1. Project Initialization & API Activation
 1. Access the [Google Cloud Console](https://console.cloud.google.com/).
@@ -38,7 +39,7 @@ Google manages authorization via the **Google Auth / OAuth Platform** portal.
 3. **Audience:** Select **External** to ensure personal accounts outside an organizational workspace can interface with the runtime.
 4. **Scopes:** Click *Add or Remove Scopes*, search for `googlehealth`, and select:
    `.../auth/googlehealth.sleep.readonly`
-5. **Test Users:** Under the *Audience/Test Users* profile, explicitly add your primary device-linked Google/Fitbit email addresses (e.g., your testing aliases). *Crucial: While the app remains unverified and in "Testing" mode, only accounts on this roster can successfully authenticate.*
+5. **Test Users:** Under the *Audience/Test Users* profile, explicitly add your primary device-linked Google/Fitbit email addresses. *Crucial: While the app remains unverified and in "Testing" mode, only accounts on this roster can successfully authenticate.*
 
 ### 3. Generate OAuth 2.0 Credentials
 1. Navigate to **APIs & Services** > **Credentials**.
@@ -52,20 +53,21 @@ Google manages authorization via the **Google Auth / OAuth Platform** portal.
    * `http://localhost:8080/`
    * `https://annolangen.github.io/fitbit`
    * `https://annolangen.github.io/fitbit/`
-6. Click **Create**. Download the resulting configuration JSON file. Note your `client_id` and `client_secret` strings.
+6. Click **Create** and copy the public `client_id` string. You can safely ignore the client secret field.
 
 ---
 
 ## Installation & Configuration
 
 ### Local Deployment
-Because the codebase is self-contained in a single, lightweight HTML asset, no packaging systems (`package.json`), node modules, or modern build frameworks are required.
+Because the codebase is self-contained in a single, lightweight HTML asset,
+no packaging systems (`package.json`), node modules, or modern build
+frameworks are required.
 
 1. Clone or download `index.html` into a local directory.
-2. Edit `index.html` configuration declarations with your designated GCP parameters:
+2. Edit `index.html` configuration declarations with your public Client ID parameter:
    ```javascript
    const CLIENT_ID = 'YOUR_GOOGLE_CLIENT_ID.apps.googleusercontent.com';
-   const CLIENT_SECRET = 'YOUR_GOOGLE_CLIENT_SECRET_STRING';
    ```
 3. Open a terminal path inside that folder and execute a light HTTP layer using Python 3:
 

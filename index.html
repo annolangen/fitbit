@@ -50,12 +50,14 @@
     <h1>Fitbit Data (via Google Health API)</h1>
     <p>A static dashboard running completely inside your browser.</p>
 
+    <!-- Auth View -->
     <div id="auth-view" class="card">
         <h3>Connect Your Account</h3>
-        <p>Authorize this application to read your sleep metric data using secure OAuth 2.0 PKCE.</p>
+        <p>Authorize this application to read your sleep metric data securely using Google OAuth 2.0.</p>
         <button class="btn" onclick="startAuthFlow()">Login with Google</button>
     </div>
 
+    <!-- Dashboard View -->
     <div id="dashboard-view" class="card hidden">
         <h3>Last Night's Sleep</h3>
         <div id="sleep-value" class="metric">Loading...</div>
@@ -65,6 +67,7 @@
         <pre id="raw-json">Waiting for payload...</pre>
     </div>
 
+    <!-- Error View -->
     <div id="error-view" class="card hidden error">
         <strong>Error:</strong> <span id="error-message"></span>
     </div>
@@ -76,124 +79,81 @@
     const REDIRECT_URI = window.location.origin + window.location.pathname.replace(/\/$/, "");
     const SCOPES = 'https://www.googleapis.com/auth/googlehealth.sleep.readonly';
     const AUTH_ENDPOINT = 'https://accounts.google.com/o/oauth2/v2/auth';
-    const TOKEN_ENDPOINT = 'https://oauth2.googleapis.com/token';
-
-    // --- PKCE CRYPTO HELPERS ---
-    function generateRandomString(length) {
-        const array = new Uint32Array(length);
-        crypto.getRandomValues(array);
-        return Array.from(array, dec => ('0' + dec.toString(16)).slice(-2)).join('').substring(0, length);
-    }
-
-    async function sha256(plain) {
-        const encoder = new TextEncoder();
-        const data = encoder.encode(plain);
-        return crypto.subtle.digest('SHA-256', data);
-    }
-
-    function base64urlencode(a) {
-        let str = "";
-        const bytes = new Uint8Array(a);
-        const len = bytes.byteLength;
-        for (let i = 0; i < len; i++) {
-            str += String.fromCharCode(bytes[i]);
-        }
-        return btoa(str).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
-    }
 
     // --- OAUTH FLOW CONTROLLERS ---
-    async function startAuthFlow() {
-        const verifier = generateRandomString(64);
-        sessionStorage.setItem('code_verifier', verifier);
-
-        const hashed = await sha256(verifier);
-        const challenge = base64urlencode(hashed);
-
+    function startAuthFlow() {
+        // Switch to response_type=token (Implicit Flow) for purely static hosting
         const authUrl = `${AUTH_ENDPOINT}?` + 
-            `response_type=code&` +
+            `response_type=token&` +
             `client_id=${encodeURIComponent(CLIENT_ID)}&` +
             `redirect_uri=${encodeURIComponent(REDIRECT_URI)}&` +
-            `scope=${encodeURIComponent(SCOPES)}&` +
-            `code_challenge=${encodeURIComponent(challenge)}&` +
-            `code_challenge_method=S256`;
+            `scope=${encodeURIComponent(SCOPES)}`;
 
         window.location.href = authUrl;
     }
 
-async function exchangeCodeForToken(code) {
-    const verifier = sessionStorage.getItem('code_verifier');
-    if (!verifier) throw new Error("Missing verification state. Please try logging in again.");
+    function checkTokenInUrl() {
+        const hash = window.location.hash;
+        if (hash) {
+            const params = new URLSearchParams(hash.substring(1));
+            const token = params.get('access_token');
+            const error = params.get('error');
 
-    const payload = new URLSearchParams({
-        client_id: CLIENT_ID,
-        client_mode: 'public', // FIX: Explicitly signals a public client to bypass client_secret enforcement
-        grant_type: 'authorization_code',
-        code: code,
-        redirect_uri: REDIRECT_URI,
-        code_verifier: verifier
-    });
-
-    const response = await fetch(TOKEN_ENDPOINT, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        body: payload
-    });
-
-    const data = await response.json();
-    if (!response.ok) throw new Error(data.error_description || "Token exchange failed");
-    
-    sessionStorage.setItem('access_token', data.access_token);
-    window.history.replaceState({}, document.title, window.location.pathname);
-    loadDashboard();
-}
-    // --- DATA CAPTURE AND REST CALLS ---
-async function fetchSleepData() {
-    const token = sessionStorage.getItem('access_token');
-    if (!token) return;
-
-    // Use local time formatting (YYYY-MM-DD) for civil filters
-    // This looks back roughly 2 days to ensure we capture last night's logs safely
-    const lookbackDate = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
-    
-    // CORRECTION: Sleep filtering MUST target 'civil_end_time' or 'end_time'
-    const url = `https://health.googleapis.com/v4/users/me/dataTypes/sleep/dataPoints?filter=sleep.interval.civil_end_time>=%22${lookbackDate}%22`;
-
-    try {
-        const response = await fetch(url, {
-            headers: { 'Authorization': `Bearer ${token}`, 'Accept': 'application/json' }
-        });
-        const data = await response.json();
-
-        document.getElementById('raw-json').textContent = JSON.stringify(data, null, 2);
-
-if (data.dataPoints && data.dataPoints.length > 0) {
-            // 1. Filter down to ONLY main overall sleep sessions (ignoring individual stage breakdowns)
-            // 2. Sort them so the most recent sleep session is first
-            const mainSessions = data.dataPoints
-                .filter(point => point.sleep && point.sleep.interval)
-                .sort((a, b) => new Date(b.sleep.interval.endTime) - new Date(a.sleep.interval.endTime));
-
-            if (mainSessions.length > 0) {
-                // Take only the single most recent session (last night)
-                const lastNight = mainSessions[0];
-                const start = new Date(lastNight.sleep.interval.startTime);
-                const end = new Date(lastNight.sleep.interval.endTime);
-                
-                const totalMinutes = (end - start) / 1000 / 60;
-                const hours = Math.floor(totalMinutes / 60);
-                const mins = Math.round(totalMinutes % 60);
-                
-                document.getElementById('sleep-value').textContent = `${hours}h ${mins}m`;
-            } else {
-                document.getElementById('sleep-value').textContent = "No main log found.";
+            if (error) {
+                showError("Authentication error: " + error);
+            } else if (token) {
+                sessionStorage.setItem('access_token', token);
+                // Clean the URL hash fragment out of the address bar
+                window.history.replaceState({}, document.title, window.location.pathname);
+                loadDashboard();
             }
-        } else {
-            document.getElementById('sleep-value').textContent = "No log found for last night.";
         }
-    } catch (err) {
-        showError("Failed to pull data from Google Health API: " + err.message);
     }
-}
+
+    // --- DATA CAPTURE AND REST CALLS ---
+    async function fetchSleepData() {
+        const token = sessionStorage.getItem('access_token');
+        if (!token) return;
+
+        // Use local time formatting (YYYY-MM-DD) looking back 2 days
+        const lookbackDate = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+        const url = `https://health.googleapis.com/v4/users/me/dataTypes/sleep/dataPoints?filter=sleep.interval.civil_end_time>=%22${lookbackDate}%22`;
+
+        try {
+            const response = await fetch(url, {
+                headers: { 'Authorization': `Bearer ${token}`, 'Accept': 'application/json' }
+            });
+            const data = await response.json();
+
+            document.getElementById('raw-json').textContent = JSON.stringify(data, null, 2);
+
+            if (data.dataPoints && data.dataPoints.length > 0) {
+                // Filter to items with intervals, and sort chronologically descending (newest first)
+                const mainSessions = data.dataPoints
+                    .filter(point => point.sleep && point.sleep.interval)
+                    .sort((a, b) => new Date(b.sleep.interval.endTime) - new Date(a.sleep.interval.endTime));
+
+                if (mainSessions.length > 0) {
+                    // Extract only the single most recent session block
+                    const lastNight = mainSessions[0];
+                    const start = new Date(lastNight.sleep.interval.startTime);
+                    const end = new Date(lastNight.sleep.interval.endTime);
+                    
+                    const totalMinutes = (end - start) / 1000 / 60;
+                    const hours = Math.floor(totalMinutes / 60);
+                    const mins = Math.round(totalMinutes % 60);
+                    
+                    document.getElementById('sleep-value').textContent = `${hours}h ${mins}m`;
+                } else {
+                    document.getElementById('sleep-value').textContent = "No main log found.";
+                }
+            } else {
+                document.getElementById('sleep-value').textContent = "No log found for last night.";
+            }
+        } catch (err) {
+            showError("Failed to pull data from Google Health API: " + err.message);
+        }
+    }
 
     // --- VIEW MANAGEMENT ---
     function loadDashboard() {
@@ -214,17 +174,13 @@ if (data.dataPoints && data.dataPoints.length > 0) {
 
     // --- RUNTIME ROUTER ---
     window.addEventListener('DOMContentLoaded', () => {
-        const urlParams = new URLSearchParams(window.location.search);
-        const code = urlParams.get('code');
-        const error = urlParams.get('error');
         const token = sessionStorage.getItem('access_token');
 
-        if (error) {
-            showError("Authentication error: " + error);
-        } else if (code) {
-            exchangeCodeForToken(code).catch(err => showError(err.message));
-        } else if (token) {
+        if (token) {
             loadDashboard();
+        } else {
+            // Check if the user just redirected back from Google with a token in the hash
+            checkTokenInUrl();
         }
     });
 </script>
