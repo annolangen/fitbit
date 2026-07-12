@@ -1,0 +1,232 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Fitbit Dashboard - Google Health API</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            background-color: #0f172a;
+            color: #f8fafc;
+            margin: 0;
+            padding: 2rem;
+            display: flex;
+            justify-content: center;
+        }
+        .container {
+            max-width: 800px;
+            width: 100%;
+        }
+        .card {
+            background-color: #1e293b;
+            border-radius: 12px;
+            padding: 2rem;
+            box-shadow: 0 4px 6px -1px rgb(0 0 0 / 0.1);
+            border: 1px solid #334155;
+            margin-top: 1.5rem;
+        }
+        h1 { color: #38bdf8; margin-top: 0; }
+        .btn {
+            background-color: #0284c7;
+            color: white;
+            border: none;
+            padding: 0.75rem 1.5rem;
+            font-size: 1rem;
+            border-radius: 6px;
+            cursor: pointer;
+            font-weight: 600;
+        }
+        .btn:hover { background-color: #0369a1; }
+        .hidden { display: none; }
+        .metric { font-size: 3.5rem; font-weight: bold; color: #fbbf24; margin: 1rem 0; }
+        .error { color: #f87171; background: #451a03; padding: 1rem; border-radius: 6px; }
+        pre { background: #020617; padding: 1rem; border-radius: 6px; overflow-x: auto; color: #a7f3d0; }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <h1>Fitbit Data (via Google Health API)</h1>
+    <p>A static dashboard running completely inside your browser.</p>
+
+    <div id="auth-view" class="card">
+        <h3>Connect Your Account</h3>
+        <p>Authorize this application to read your sleep metric data using secure OAuth 2.0 PKCE.</p>
+        <button class="btn" onclick="startAuthFlow()">Login with Google</button>
+    </div>
+
+    <div id="dashboard-view" class="card hidden">
+        <h3>Last Night's Sleep</h3>
+        <div id="sleep-value" class="metric">Loading...</div>
+        <button class="btn" onclick="logout()">Disconnect</button>
+        
+        <h4>Raw API Response Object:</h4>
+        <pre id="raw-json">Waiting for payload...</pre>
+    </div>
+
+    <div id="error-view" class="card hidden error">
+        <strong>Error:</strong> <span id="error-message"></span>
+    </div>
+</div>
+
+<script>
+    // --- CONFIGURATION ---
+    const CLIENT_ID = '356448156280-v8uhggf2sfgrgu5tb099tlg3qu0phe22.apps.googleusercontent.com'; 
+    const REDIRECT_URI = window.location.origin + window.location.pathname.replace(/\/$/, "");
+    const SCOPES = 'https://www.googleapis.com/auth/googlehealth.sleep.readonly';
+    const AUTH_ENDPOINT = 'https://accounts.google.com/o/oauth2/v2/auth';
+    const TOKEN_ENDPOINT = 'https://oauth2.googleapis.com/token';
+
+    // --- PKCE CRYPTO HELPERS ---
+    function generateRandomString(length) {
+        const array = new Uint32Array(length);
+        crypto.getRandomValues(array);
+        return Array.from(array, dec => ('0' + dec.toString(16)).slice(-2)).join('').substring(0, length);
+    }
+
+    async function sha256(plain) {
+        const encoder = new TextEncoder();
+        const data = encoder.encode(plain);
+        return crypto.subtle.digest('SHA-256', data);
+    }
+
+    function base64urlencode(a) {
+        let str = "";
+        const bytes = new Uint8Array(a);
+        const len = bytes.byteLength;
+        for (let i = 0; i < len; i++) {
+            str += String.fromCharCode(bytes[i]);
+        }
+        return btoa(str).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+    }
+
+    // --- OAUTH FLOW CONTROLLERS ---
+    async function startAuthFlow() {
+        const verifier = generateRandomString(64);
+        sessionStorage.setItem('code_verifier', verifier);
+
+        const hashed = await sha256(verifier);
+        const challenge = base64urlencode(hashed);
+
+        const authUrl = `${AUTH_ENDPOINT}?` + 
+            `response_type=code&` +
+            `client_id=${encodeURIComponent(CLIENT_ID)}&` +
+            `redirect_uri=${encodeURIComponent(REDIRECT_URI)}&` +
+            `scope=${encodeURIComponent(SCOPES)}&` +
+            `code_challenge=${encodeURIComponent(challenge)}&` +
+            `code_challenge_method=S256`;
+
+        window.location.href = authUrl;
+    }
+
+async function exchangeCodeForToken(code) {
+    const verifier = sessionStorage.getItem('code_verifier');
+    if (!verifier) throw new Error("Missing verification state. Please try logging in again.");
+
+    const payload = new URLSearchParams({
+        client_id: CLIENT_ID,
+        client_mode: 'public', // FIX: Explicitly signals a public client to bypass client_secret enforcement
+        grant_type: 'authorization_code',
+        code: code,
+        redirect_uri: REDIRECT_URI,
+        code_verifier: verifier
+    });
+
+    const response = await fetch(TOKEN_ENDPOINT, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: payload
+    });
+
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error_description || "Token exchange failed");
+    
+    sessionStorage.setItem('access_token', data.access_token);
+    window.history.replaceState({}, document.title, window.location.pathname);
+    loadDashboard();
+}
+    // --- DATA CAPTURE AND REST CALLS ---
+async function fetchSleepData() {
+    const token = sessionStorage.getItem('access_token');
+    if (!token) return;
+
+    // Use local time formatting (YYYY-MM-DD) for civil filters
+    // This looks back roughly 2 days to ensure we capture last night's logs safely
+    const lookbackDate = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+    
+    // CORRECTION: Sleep filtering MUST target 'civil_end_time' or 'end_time'
+    const url = `https://health.googleapis.com/v4/users/me/dataTypes/sleep/dataPoints?filter=sleep.interval.civil_end_time>=%22${lookbackDate}%22`;
+
+    try {
+        const response = await fetch(url, {
+            headers: { 'Authorization': `Bearer ${token}`, 'Accept': 'application/json' }
+        });
+        const data = await response.json();
+
+        document.getElementById('raw-json').textContent = JSON.stringify(data, null, 2);
+
+if (data.dataPoints && data.dataPoints.length > 0) {
+            // 1. Filter down to ONLY main overall sleep sessions (ignoring individual stage breakdowns)
+            // 2. Sort them so the most recent sleep session is first
+            const mainSessions = data.dataPoints
+                .filter(point => point.sleep && point.sleep.interval)
+                .sort((a, b) => new Date(b.sleep.interval.endTime) - new Date(a.sleep.interval.endTime));
+
+            if (mainSessions.length > 0) {
+                // Take only the single most recent session (last night)
+                const lastNight = mainSessions[0];
+                const start = new Date(lastNight.sleep.interval.startTime);
+                const end = new Date(lastNight.sleep.interval.endTime);
+                
+                const totalMinutes = (end - start) / 1000 / 60;
+                const hours = Math.floor(totalMinutes / 60);
+                const mins = Math.round(totalMinutes % 60);
+                
+                document.getElementById('sleep-value').textContent = `${hours}h ${mins}m`;
+            } else {
+                document.getElementById('sleep-value').textContent = "No main log found.";
+            }
+        } else {
+            document.getElementById('sleep-value').textContent = "No log found for last night.";
+        }
+    } catch (err) {
+        showError("Failed to pull data from Google Health API: " + err.message);
+    }
+}
+
+    // --- VIEW MANAGEMENT ---
+    function loadDashboard() {
+        document.getElementById('auth-view').classList.add('hidden');
+        document.getElementById('dashboard-view').classList.remove('hidden');
+        fetchSleepData();
+    }
+
+    function logout() {
+        sessionStorage.clear();
+        window.location.reload();
+    }
+
+    function showError(msg) {
+        document.getElementById('error-view').classList.remove('hidden');
+        document.getElementById('error-message').textContent = msg;
+    }
+
+    // --- RUNTIME ROUTER ---
+    window.addEventListener('DOMContentLoaded', () => {
+        const urlParams = new URLSearchParams(window.location.search);
+        const code = urlParams.get('code');
+        const error = urlParams.get('error');
+        const token = sessionStorage.getItem('access_token');
+
+        if (error) {
+            showError("Authentication error: " + error);
+        } else if (code) {
+            exchangeCodeForToken(code).catch(err => showError(err.message));
+        } else if (token) {
+            loadDashboard();
+        }
+    });
+</script>
+</body>
+</html>
