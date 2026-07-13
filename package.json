@@ -1,0 +1,31 @@
+{
+  "name": "fitbit",
+  "version": "0.0.0",
+  "description": "",
+  "source": "src/index.html",
+  "license": "Apache-2.0",
+  "keywords": [],
+  "scripts": {
+    "dev": "vite --host 0.0.0.0 --port 8080 --strictPort",
+    "build": "vite build",
+    "build:relative": "vite build --base=./",
+    "preview": "vite preview --host 0.0.0.0 --port 8080 --strictPort",
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "lint": "gts lint",
+    "clean": "gts clean",
+    "compile": "tsc",
+    "fix": "gts fix",
+    "prepare": "npm run compile",
+    "pretest": "npm run compile",
+    "posttest": "npm run lint"
+  },
+  "devDependencies": {
+    "@types/node": "^22.7.5",
+    "gts": "^7.0.0",
+    "typescript": "^5.6.3",
+    "vite": "^8.1.4"
+  },
+  "dependencies": {
+    "lit-html": "^3.3.3"
+  }
+}
